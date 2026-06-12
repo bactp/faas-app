@@ -1,0 +1,70 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: image-classifier
+  namespace: default
+  labels:
+    app: image-classifier
+    serving.knative.dev/visibility: cluster-local   # remove if you want external access
+spec:
+  template:
+    metadata:
+      annotations:
+        # ── Autoscaling ──────────────────────────────────────────────
+        autoscaling.knative.dev/class:        "kpa.autoscaling.knative.dev"
+        autoscaling.knative.dev/metric:       "concurrency"
+        autoscaling.knative.dev/target:       "1"       # max 5 in-flight requests per pod
+        autoscaling.knative.dev/minScale:     "0"       # scale-to-zero (FaaS mode)
+        autoscaling.knative.dev/maxScale:     "10"
+        autoscaling.knative.dev/scaleDownDelay: "20s"   # stay warm 60s after last request
+        # ── Startup ──────────────────────────────────────────────────
+        autoscaling.knative.dev/initial-scale: "1"      # spin up 1 pod on first deploy
+    spec:
+      containerConcurrency: 1      # matches KPA target above
+      timeoutSeconds: 60           # image inference can be slow on cold start
+
+      containers:
+        - name: image-classifier
+          image: phuongbac/faas_app:latest
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http1             # use 'http1' if your client doesn't support HTTP/2
+              containerPort: 8080
+
+          env:
+            - name: MODEL_PATH
+              value: "model/cifar10_model.h5"
+            - name: NORM_PATH
+              value: "model/cifar10_model_norm.npz"
+            - name: TOP_K
+              value: "3"
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"       # H5 model + numpy norm + uvicorn workers
+
+          # ── Health probes ─────────────────────────────────────────
+          # Adjust path to match your FastAPI router (e.g. /health or /ping)
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+
+  traffic:
+    - latestRevision: true
+      percent: 100
